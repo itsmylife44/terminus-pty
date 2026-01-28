@@ -73,15 +73,28 @@ func (s *Session) broadcastLoop() {
 		case <-s.done:
 			return
 		case data := <-s.broadcast:
-			s.clientsMu.RLock()
-			for client := range s.clients {
-				err := client.WriteMessage(websocket.BinaryMessage, data)
-				if err != nil {
-					client.Close()
-				}
-			}
-			s.clientsMu.RUnlock()
+			s.broadcastToClients(data)
 		}
+	}
+}
+
+func (s *Session) broadcastToClients(data []byte) {
+	s.clientsMu.RLock()
+	clients := make([]*websocket.Conn, 0, len(s.clients))
+	for client := range s.clients {
+		clients = append(clients, client)
+	}
+	s.clientsMu.RUnlock()
+
+	var failed []*websocket.Conn
+	for _, client := range clients {
+		if err := client.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			failed = append(failed, client)
+		}
+	}
+
+	for _, client := range failed {
+		client.Close()
 	}
 }
 
