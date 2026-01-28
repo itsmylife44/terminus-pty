@@ -17,11 +17,12 @@ type Session struct {
 	DisconnectedAt  *time.Time
 	TmuxSessionName string // tmux session name when TmuxEnabled, empty otherwise
 
-	clients   map[*websocket.Conn]bool
-	clientsMu sync.RWMutex
-	broadcast chan []byte
-	done      chan struct{}
-	closeOnce sync.Once
+	clients           map[*websocket.Conn]string // maps connection to client ID
+	clientsMu         sync.RWMutex
+	connectedClientId string // current active client ID (empty if no clients)
+	broadcast         chan []byte
+	done              chan struct{}
+	closeOnce         sync.Once
 }
 
 func NewSession(id string, p *pty.PTY, cols, rows uint16) *Session {
@@ -31,7 +32,7 @@ func NewSession(id string, p *pty.PTY, cols, rows uint16) *Session {
 		Cols:      cols,
 		Rows:      rows,
 		CreatedAt: time.Now(),
-		clients:   make(map[*websocket.Conn]bool),
+		clients:   make(map[*websocket.Conn]string),
 		broadcast: make(chan []byte, 256),
 		done:      make(chan struct{}),
 	}
@@ -99,16 +100,24 @@ func (s *Session) broadcastToClients(data []byte) {
 	}
 }
 
-func (s *Session) AddClient(conn *websocket.Conn) {
+// AddClient registers a new WebSocket client with a client ID.
+// Returns the generated client ID.
+func (s *Session) AddClient(conn *websocket.Conn, clientID string) {
 	s.clientsMu.Lock()
-	s.clients[conn] = true
+	s.clients[conn] = clientID
+	s.connectedClientId = clientID
 	s.DisconnectedAt = nil
 	s.clientsMu.Unlock()
 }
 
 func (s *Session) RemoveClient(conn *websocket.Conn) {
 	s.clientsMu.Lock()
+	clientID := s.clients[conn]
 	delete(s.clients, conn)
+	// Clear connectedClientId if the removed client was the active one
+	if s.connectedClientId == clientID {
+		s.connectedClientId = ""
+	}
 	if len(s.clients) == 0 {
 		now := time.Now()
 		s.DisconnectedAt = &now
@@ -120,6 +129,41 @@ func (s *Session) ClientCount() int {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
 	return len(s.clients)
+}
+
+// IsOccupied returns true if there's at least one connected client.
+func (s *Session) IsOccupied() bool {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	return s.connectedClientId != ""
+}
+
+// ConnectedClientID returns the current active client ID.
+func (s *Session) ConnectedClientID() string {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	return s.connectedClientId
+}
+
+// CloseCode4001 is the WebSocket close code for session takeover.
+const CloseCode4001 = 4001
+
+// DisconnectAllClients disconnects all connected clients with a close frame.
+// Used for session takeover. Returns the number of clients disconnected.
+func (s *Session) DisconnectAllClients(closeCode int, closeMessage string) int {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+
+	count := len(s.clients)
+	for conn := range s.clients {
+		// Send close frame with custom code and message
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(closeCode, closeMessage))
+		conn.Close()
+	}
+	s.clients = make(map[*websocket.Conn]string)
+	s.connectedClientId = ""
+	return count
 }
 
 func (s *Session) Write(data []byte) error {
@@ -144,7 +188,8 @@ func (s *Session) Close() {
 		for client := range s.clients {
 			client.Close()
 		}
-		s.clients = make(map[*websocket.Conn]bool)
+		s.clients = make(map[*websocket.Conn]string)
+		s.connectedClientId = ""
 		s.clientsMu.Unlock()
 
 		if s.PTY != nil {
@@ -163,7 +208,8 @@ func (s *Session) CloseWithTmux() {
 		for client := range s.clients {
 			client.Close()
 		}
-		s.clients = make(map[*websocket.Conn]bool)
+		s.clients = make(map[*websocket.Conn]string)
+		s.connectedClientId = ""
 		s.clientsMu.Unlock()
 
 		if s.PTY != nil {
