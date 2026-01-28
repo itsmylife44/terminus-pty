@@ -16,6 +16,7 @@ type Session struct {
 	CreatedAt       time.Time
 	DisconnectedAt  *time.Time
 	TmuxSessionName string // tmux session name when TmuxEnabled, empty otherwise
+	LastActivityAt  time.Time
 
 	clients           map[*websocket.Conn]string // maps connection to client ID
 	clientsMu         sync.RWMutex
@@ -26,15 +27,17 @@ type Session struct {
 }
 
 func NewSession(id string, p *pty.PTY, cols, rows uint16) *Session {
+	now := time.Now()
 	s := &Session{
-		ID:        id,
-		PTY:       p,
-		Cols:      cols,
-		Rows:      rows,
-		CreatedAt: time.Now(),
-		clients:   make(map[*websocket.Conn]string),
-		broadcast: make(chan []byte, 256),
-		done:      make(chan struct{}),
+		ID:             id,
+		PTY:            p,
+		Cols:           cols,
+		Rows:           rows,
+		CreatedAt:      now,
+		LastActivityAt: now,
+		clients:        make(map[*websocket.Conn]string),
+		broadcast:      make(chan []byte, 256),
+		done:           make(chan struct{}),
 	}
 
 	go s.readPTY()
@@ -107,7 +110,22 @@ func (s *Session) AddClient(conn *websocket.Conn, clientID string) {
 	s.clients[conn] = clientID
 	s.connectedClientId = clientID
 	s.DisconnectedAt = nil
+	s.LastActivityAt = time.Now()
 	s.clientsMu.Unlock()
+}
+
+// UpdateActivity updates the last activity timestamp.
+func (s *Session) UpdateActivity() {
+	s.clientsMu.Lock()
+	s.LastActivityAt = time.Now()
+	s.clientsMu.Unlock()
+}
+
+// GetLastActivity returns the last activity timestamp.
+func (s *Session) GetLastActivity() time.Time {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	return s.LastActivityAt
 }
 
 func (s *Session) RemoveClient(conn *websocket.Conn) {

@@ -36,6 +36,8 @@ func main() {
 	authUser := flag.String("auth-user", "", "Basic auth username (optional)")
 	authPass := flag.String("auth-pass", "", "Basic auth password (optional)")
 	tmuxEnabled := flag.Bool("tmux-enabled", false, "Spawn PTY sessions inside tmux for persistence")
+	maxInactive := flag.String("max-inactive", "24h", "Maximum inactivity time for tmux sessions before cleanup")
+	cleanupIntervalTmux := flag.String("cleanup-interval-tmux", "1h", "Interval for tmux session cleanup (min: 10m)")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -58,6 +60,26 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("tmux mode enabled - sessions will persist across disconnections")
+	}
+
+	// Parse tmux cleanup durations
+	maxInactiveDur, err := time.ParseDuration(*maxInactive)
+	if err != nil {
+		slog.Error("Invalid -max-inactive duration", "value", *maxInactive, "error", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid -max-inactive duration: %s\n", *maxInactive)
+		os.Exit(1)
+	}
+
+	cleanupIntervalTmuxDur, err := time.ParseDuration(*cleanupIntervalTmux)
+	if err != nil {
+		slog.Error("Invalid -cleanup-interval-tmux duration", "value", *cleanupIntervalTmux, "error", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid -cleanup-interval-tmux duration: %s\n", *cleanupIntervalTmux)
+		os.Exit(1)
+	}
+	// Enforce minimum 10m cleanup interval
+	if cleanupIntervalTmuxDur < 10*time.Minute {
+		slog.Warn("cleanup-interval-tmux too low, using minimum 10m", "requested", cleanupIntervalTmuxDur)
+		cleanupIntervalTmuxDur = 10 * time.Minute
 	}
 
 	// Resolve command (--command takes precedence over --shell)
@@ -83,17 +105,20 @@ func main() {
 	}
 
 	pool := session.NewPool(session.PoolConfig{
-		SessionTimeout:  *sessionTimeout,
-		CleanupInterval: *cleanupInterval,
-		DefaultCommand:  cmdPath,
-		DefaultArgs:     cmdArgs,
-		DefaultWorkdir:  *workdir,
-		TmuxEnabled:     *tmuxEnabled,
+		SessionTimeout:      *sessionTimeout,
+		CleanupInterval:     *cleanupInterval,
+		DefaultCommand:      cmdPath,
+		DefaultArgs:         cmdArgs,
+		DefaultWorkdir:      *workdir,
+		TmuxEnabled:         *tmuxEnabled,
+		MaxInactive:         maxInactiveDur,
+		TmuxCleanupInterval: cleanupIntervalTmuxDur,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go pool.StartCleanup(ctx)
+	go pool.StartTmuxCleanup(ctx)
 
 	var authenticator *auth.BasicAuth
 	if *authUser != "" && *authPass != "" {

@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/itsmylife44/terminus-pty/internal/auth"
 	"github.com/itsmylife44/terminus-pty/internal/session"
+	"github.com/itsmylife44/terminus-pty/internal/tmux"
 )
 
 // generateClientID creates a random 16-character hex string for client identification.
@@ -46,6 +48,7 @@ func NewHandler(pool *session.Pool, authenticator *auth.BasicAuth) http.Handler 
 	r.HandleFunc("/pty/{id}", h.deleteSession).Methods("DELETE")
 	r.HandleFunc("/pty/{id}/connect", h.connectSession).Methods("GET")
 	r.HandleFunc("/pty/{id}/takeover", h.takeoverSession).Methods("POST")
+	r.HandleFunc("/pty/{id}/scrollback", h.getScrollback).Methods("GET")
 
 	if authenticator != nil {
 		return authenticator.Middleware(r)
@@ -242,8 +245,47 @@ func (h *Handler) connectSession(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
+		// Update activity on write
+		sess.UpdateActivity()
 		if err := sess.Write(data); err != nil {
 			return
 		}
 	}
+}
+
+// getScrollback returns the scrollback buffer of a tmux session.
+// GET /pty/{id}/scrollback?lines=1000
+func (h *Handler) getScrollback(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	sess, ok := h.pool.Get(id)
+	if !ok {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	// Check if this is a tmux session
+	if sess.TmuxSessionName == "" {
+		http.Error(w, "Session is not a tmux session", http.StatusBadRequest)
+		return
+	}
+
+	// Parse lines parameter (default 1000)
+	lines := 1000
+	if linesParam := r.URL.Query().Get("lines"); linesParam != "" {
+		if parsed, err := strconv.Atoi(linesParam); err == nil && parsed > 0 {
+			lines = parsed
+		}
+	}
+
+	output, err := tmux.CapturePane(sess.TmuxSessionName, lines)
+	if err != nil {
+		slog.Error("Failed to capture scrollback", "id", id, "error", err)
+		http.Error(w, "Failed to capture scrollback: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return plain text with ANSI codes preserved
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(output))
 }

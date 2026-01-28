@@ -14,12 +14,14 @@ import (
 )
 
 type PoolConfig struct {
-	SessionTimeout  time.Duration
-	CleanupInterval time.Duration
-	DefaultCommand  string
-	DefaultArgs     []string
-	DefaultWorkdir  string
-	TmuxEnabled     bool
+	SessionTimeout      time.Duration
+	CleanupInterval     time.Duration
+	DefaultCommand      string
+	DefaultArgs         []string
+	DefaultWorkdir      string
+	TmuxEnabled         bool
+	MaxInactive         time.Duration // Max inactivity time for tmux session cleanup
+	TmuxCleanupInterval time.Duration // Interval for tmux cleanup goroutine
 }
 
 type Pool struct {
@@ -197,4 +199,104 @@ func (p *Pool) Count() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.sessions)
+}
+
+// StartTmuxCleanup starts the background goroutine that cleans up orphaned tmux sessions.
+// This cleans tmux sessions with "pty_" prefix that have no clients and exceed max-inactive.
+func (p *Pool) StartTmuxCleanup(ctx context.Context) {
+	if !p.config.TmuxEnabled {
+		return // No cleanup needed if tmux is disabled
+	}
+
+	interval := p.config.TmuxCleanupInterval
+	if interval < 10*time.Minute {
+		interval = 10 * time.Minute
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	slog.Info("Starting tmux cleanup goroutine", "interval", interval, "max_inactive", p.config.MaxInactive)
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Tmux cleanup goroutine stopped")
+			return
+		case <-ticker.C:
+			p.cleanupTmuxSessions()
+		}
+	}
+}
+
+// cleanupTmuxSessions checks for orphaned tmux sessions and kills them.
+func (p *Pool) cleanupTmuxSessions() {
+	// List all tmux sessions with our prefix
+	sessions, err := tmux.ListSessions("pty_")
+	if err != nil {
+		slog.Error("Failed to list tmux sessions", "error", err)
+		return
+	}
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	now := time.Now()
+	var killed []string
+
+	p.mu.RLock()
+	for _, tmuxSessionName := range sessions {
+		// Check if this tmux session is tracked in our pool
+		var trackedSession *Session
+		for _, s := range p.sessions {
+			if s.TmuxSessionName == tmuxSessionName {
+				trackedSession = s
+				break
+			}
+		}
+
+		// If session is in pool, check activity
+		if trackedSession != nil {
+			// Session is tracked - check if it's inactive
+			if trackedSession.ClientCount() == 0 {
+				lastActivity := trackedSession.GetLastActivity()
+				if now.Sub(lastActivity) > p.config.MaxInactive {
+					killed = append(killed, tmuxSessionName)
+				}
+			}
+		} else {
+			// Session is not in our pool but has our prefix - orphaned
+			// Check if it has no attached clients
+			clientCount := tmux.GetSessionClientCount(tmuxSessionName)
+			if clientCount == 0 {
+				killed = append(killed, tmuxSessionName)
+			}
+		}
+	}
+	p.mu.RUnlock()
+
+	// Kill orphaned/inactive sessions outside the lock
+	for _, sessionName := range killed {
+		if err := tmux.KillSession(sessionName); err != nil {
+			slog.Error("Failed to kill tmux session", "session", sessionName, "error", err)
+		} else {
+			slog.Info("Killed inactive tmux session", "session", sessionName)
+		}
+
+		// Also remove from pool if tracked
+		p.mu.Lock()
+		for id, s := range p.sessions {
+			if s.TmuxSessionName == sessionName {
+				s.Close()
+				delete(p.sessions, id)
+				break
+			}
+		}
+		p.mu.Unlock()
+	}
+
+	if len(killed) > 0 {
+		slog.Info("Tmux cleanup completed", "killed", len(killed))
+	}
 }

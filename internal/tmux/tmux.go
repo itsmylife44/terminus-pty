@@ -102,3 +102,64 @@ func ResizeSession(sessionName string, cols, rows uint16) error {
 	cmd := exec.Command("tmux", "resize-window", "-t", sessionName, "-x", fmt.Sprintf("%d", cols), "-y", fmt.Sprintf("%d", rows))
 	return cmd.Run()
 }
+
+// CapturePane captures the scrollback buffer from a tmux session.
+// Returns the raw output including ANSI codes. Lines specifies how many lines
+// to capture from the scrollback (default 1000 if 0).
+func CapturePane(sessionName string, lines int) (string, error) {
+	if !SessionExists(sessionName) {
+		return "", fmt.Errorf("tmux session %q does not exist", sessionName)
+	}
+
+	if lines <= 0 {
+		lines = 1000
+	}
+
+	// capture-pane -p prints to stdout, -t targets session, -S sets start line (negative = history)
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", sessionName, "-S", fmt.Sprintf("-%d", lines))
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to capture pane: %w", err)
+	}
+
+	return string(output), nil
+}
+
+// ListSessions returns a list of tmux session names with a given prefix.
+func ListSessions(prefix string) ([]string, error) {
+	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}")
+	output, err := cmd.Output()
+	if err != nil {
+		// If no sessions exist, tmux returns an error
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	var sessions []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line != "" && strings.HasPrefix(line, prefix) {
+			sessions = append(sessions, line)
+		}
+	}
+	return sessions, nil
+}
+
+// GetSessionInfo returns information about a tmux session.
+// Returns number of attached clients, or -1 if session doesn't exist.
+func GetSessionClientCount(sessionName string) int {
+	if !SessionExists(sessionName) {
+		return -1
+	}
+
+	cmd := exec.Command("tmux", "display-message", "-t", sessionName, "-p", "#{session_attached}")
+	output, err := cmd.Output()
+	if err != nil {
+		return -1
+	}
+
+	count := 0
+	fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &count)
+	return count
+}
