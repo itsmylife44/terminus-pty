@@ -15,6 +15,7 @@ import (
 	"github.com/itsmylife44/terminus-pty/internal/api"
 	"github.com/itsmylife44/terminus-pty/internal/auth"
 	"github.com/itsmylife44/terminus-pty/internal/session"
+	"github.com/itsmylife44/terminus-pty/internal/tmux"
 )
 
 var (
@@ -34,6 +35,7 @@ func main() {
 	workdir := flag.String("workdir", "", "Working directory for new sessions")
 	authUser := flag.String("auth-user", "", "Basic auth username (optional)")
 	authPass := flag.String("auth-pass", "", "Basic auth password (optional)")
+	tmuxEnabled := flag.Bool("tmux-enabled", false, "Spawn PTY sessions inside tmux for persistence")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -46,6 +48,17 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
+
+	// Check tmux is installed if tmux mode is enabled
+	if *tmuxEnabled {
+		if err := tmux.CheckInstalled(); err != nil {
+			slog.Error("tmux mode enabled but tmux is not installed", "error", err)
+			fmt.Fprintf(os.Stderr, "Error: tmux mode enabled but tmux is not installed.\n")
+			fmt.Fprintf(os.Stderr, "Install tmux or run without --tmux-enabled flag.\n")
+			os.Exit(1)
+		}
+		slog.Info("tmux mode enabled - sessions will persist across disconnections")
+	}
 
 	// Resolve command (--command takes precedence over --shell)
 	cmdPath := *command
@@ -75,6 +88,7 @@ func main() {
 		DefaultCommand:  cmdPath,
 		DefaultArgs:     cmdArgs,
 		DefaultWorkdir:  *workdir,
+		TmuxEnabled:     *tmuxEnabled,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,7 +115,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("Starting terminus-pty", "addr", addr, "command", cmdPath, "args", cmdArgs, "workdir", *workdir, "version", version)
+		slog.Info("Starting terminus-pty", "addr", addr, "command", cmdPath, "args", cmdArgs, "workdir", *workdir, "version", version, "tmux_enabled", *tmuxEnabled, "session_timeout", *sessionTimeout)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("Server error", "error", err)
 			os.Exit(1)

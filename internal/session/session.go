@@ -9,12 +9,13 @@ import (
 )
 
 type Session struct {
-	ID             string
-	PTY            *pty.PTY
-	Cols           uint16
-	Rows           uint16
-	CreatedAt      time.Time
-	DisconnectedAt *time.Time
+	ID              string
+	PTY             *pty.PTY
+	Cols            uint16
+	Rows            uint16
+	CreatedAt       time.Time
+	DisconnectedAt  *time.Time
+	TmuxSessionName string // tmux session name when TmuxEnabled, empty otherwise
 
 	clients   map[*websocket.Conn]bool
 	clientsMu sync.RWMutex
@@ -132,6 +133,9 @@ func (s *Session) Resize(cols, rows uint16) error {
 	return s.PTY.Resize(cols, rows)
 }
 
+// Close closes the session. For tmux sessions, it only closes the PTY attachment,
+// NOT the underlying tmux session (preserving it for reconnection).
+// To fully close including the tmux session, use CloseWithTmux.
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		close(s.done)
@@ -147,6 +151,43 @@ func (s *Session) Close() {
 			s.PTY.Close()
 		}
 	})
+}
+
+// CloseWithTmux closes the session and kills the tmux session if present.
+// Use this for explicit DELETE requests or timeout cleanup.
+func (s *Session) CloseWithTmux() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+
+		s.clientsMu.Lock()
+		for client := range s.clients {
+			client.Close()
+		}
+		s.clients = make(map[*websocket.Conn]bool)
+		s.clientsMu.Unlock()
+
+		if s.PTY != nil {
+			s.PTY.CloseWithTmux()
+		}
+	})
+}
+
+// ReplacePTY replaces the current PTY with a new one (used for tmux reattachment).
+func (s *Session) ReplacePTY(newPTY *pty.PTY) {
+	// Close old PTY (but not tmux session)
+	if s.PTY != nil {
+		s.PTY.Close()
+	}
+	s.PTY = newPTY
+
+	// Restart the read loop with new PTY
+	// Note: The old readPTY goroutine will exit on the next Read error
+	// We need a fresh done channel for the new PTY
+	s.done = make(chan struct{})
+	s.closeOnce = sync.Once{}
+
+	go s.readPTY()
+	go s.broadcastLoop()
 }
 
 func (s *Session) IsClosed() bool {

@@ -2,12 +2,14 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/itsmylife44/terminus-pty/internal/pty"
+	"github.com/itsmylife44/terminus-pty/internal/tmux"
 	"github.com/rs/xid"
 )
 
@@ -17,6 +19,7 @@ type PoolConfig struct {
 	DefaultCommand  string
 	DefaultArgs     []string
 	DefaultWorkdir  string
+	TmuxEnabled     bool
 }
 
 type Pool struct {
@@ -52,20 +55,65 @@ func (p *Pool) Create(cols, rows uint16, command string, args []string, workdir 
 		wd = p.config.DefaultWorkdir
 	}
 
-	ptty, err := pty.Spawn(cmd, cmdArgs, cols, rows, wd)
-	if err != nil {
-		return nil, err
+	id := "pty_" + xid.New().String()
+	var ptty *pty.PTY
+	var tmuxSessionName string
+	var err error
+
+	if p.config.TmuxEnabled {
+		// Spawn PTY inside tmux for persistence
+		tmuxSessionName = id // Use session ID as tmux session name
+		ptty, err = pty.SpawnWithTmux(tmuxSessionName, cmd, cmdArgs, cols, rows, wd)
+		if err != nil {
+			return nil, fmt.Errorf("tmux spawn failed: %w", err)
+		}
+		slog.Info("Session created with tmux", "id", id, "tmux_session", tmuxSessionName, "command", cmd, "args", cmdArgs, "workdir", wd, "cols", cols, "rows", rows)
+	} else {
+		// Direct PTY spawn (existing behavior)
+		ptty, err = pty.Spawn(cmd, cmdArgs, cols, rows, wd)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("Session created", "id", id, "command", cmd, "args", cmdArgs, "workdir", wd, "cols", cols, "rows", rows)
 	}
 
-	id := "pty_" + xid.New().String()
 	session := NewSession(id, ptty, cols, rows)
+	session.TmuxSessionName = tmuxSessionName
 
 	p.mu.Lock()
 	p.sessions[id] = session
 	p.mu.Unlock()
 
-	slog.Info("Session created", "id", id, "command", cmd, "args", cmdArgs, "workdir", wd, "cols", cols, "rows", rows)
 	return session, nil
+}
+
+// ReattachTmux reattaches to an existing tmux session. Only works if TmuxEnabled.
+func (p *Pool) ReattachTmux(session *Session, cols, rows uint16) error {
+	if !p.config.TmuxEnabled || session.TmuxSessionName == "" {
+		return fmt.Errorf("session %s is not a tmux session", session.ID)
+	}
+
+	// Check if tmux session still exists
+	if !tmux.SessionExists(session.TmuxSessionName) {
+		return fmt.Errorf("tmux session %s no longer exists", session.TmuxSessionName)
+	}
+
+	// If PTY is already closed, reattach
+	if session.IsClosed() {
+		return fmt.Errorf("session is closed and cannot be reattached")
+	}
+
+	// Create new PTY attachment to existing tmux session
+	ptty, err := pty.AttachTmux(session.TmuxSessionName, cols, rows)
+	if err != nil {
+		return fmt.Errorf("failed to reattach to tmux session: %w", err)
+	}
+
+	// Replace the PTY in the session
+	session.ReplacePTY(ptty)
+
+	slog.Info("Reattached to tmux session", "id", session.ID, "tmux_session", session.TmuxSessionName)
+	return nil
 }
 
 func (p *Pool) Get(id string) (*Session, bool) {
@@ -81,7 +129,8 @@ func (p *Pool) Get(id string) (*Session, bool) {
 func (p *Pool) Remove(id string) {
 	p.mu.Lock()
 	if session, ok := p.sessions[id]; ok {
-		session.Close()
+		// Explicit DELETE should kill tmux session too
+		session.CloseWithTmux()
 		delete(p.sessions, id)
 	}
 	p.mu.Unlock()
@@ -117,14 +166,15 @@ func (p *Pool) cleanup() {
 		if session.DisconnectedAt != nil && session.ClientCount() == 0 {
 			if now.Sub(*session.DisconnectedAt) > p.config.SessionTimeout {
 				toRemove = append(toRemove, id)
-				slog.Info("Session expired", "id", id, "disconnected_for", now.Sub(*session.DisconnectedAt))
+				slog.Info("Session expired", "id", id, "disconnected_for", now.Sub(*session.DisconnectedAt), "tmux", session.TmuxSessionName != "")
 			}
 		}
 	}
 
 	for _, id := range toRemove {
 		if session, ok := p.sessions[id]; ok {
-			session.Close()
+			// Use CloseWithTmux to kill tmux sessions on timeout
+			session.CloseWithTmux()
 			delete(p.sessions, id)
 		}
 	}
@@ -135,7 +185,8 @@ func (p *Pool) CloseAll() {
 	defer p.mu.Unlock()
 
 	for id, session := range p.sessions {
-		session.Close()
+		// On server shutdown, kill tmux sessions too
+		session.CloseWithTmux()
 		delete(p.sessions, id)
 	}
 
