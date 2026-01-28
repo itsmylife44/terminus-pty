@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,7 +28,10 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "Host to bind to")
 	sessionTimeout := flag.Duration("session-timeout", 30*time.Second, "Session pool timeout after disconnect")
 	cleanupInterval := flag.Duration("cleanup-interval", 10*time.Second, "Session cleanup interval")
-	shell := flag.String("shell", "", "Shell to use (default: $SHELL or /bin/bash)")
+	shell := flag.String("shell", "", "Shell to use (default: $SHELL or /bin/bash) - alias for --command")
+	command := flag.String("command", "", "Command to run (default: $SHELL or /bin/bash)")
+	args := flag.String("args", "", "Command arguments (comma-separated, default: -l,-i for shells)")
+	workdir := flag.String("workdir", "", "Working directory for new sessions")
 	authUser := flag.String("auth-user", "", "Basic auth username (optional)")
 	authPass := flag.String("auth-pass", "", "Basic auth password (optional)")
 	showVersion := flag.Bool("version", false, "Show version")
@@ -43,18 +47,34 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	shellCmd := *shell
-	if shellCmd == "" {
-		shellCmd = os.Getenv("SHELL")
-		if shellCmd == "" {
-			shellCmd = "/bin/bash"
+	// Resolve command (--command takes precedence over --shell)
+	cmdPath := *command
+	if cmdPath == "" {
+		cmdPath = *shell // Backward compatibility
+	}
+	if cmdPath == "" {
+		cmdPath = os.Getenv("SHELL")
+		if cmdPath == "" {
+			cmdPath = "/bin/bash"
 		}
+	}
+
+	// Parse args
+	var cmdArgs []string
+	if *args != "" {
+		cmdArgs = strings.Split(*args, ",")
+	}
+	// Default args for shells
+	if len(cmdArgs) == 0 && (strings.HasSuffix(cmdPath, "sh") || strings.Contains(cmdPath, "/sh")) {
+		cmdArgs = []string{"-l", "-i"}
 	}
 
 	pool := session.NewPool(session.PoolConfig{
 		SessionTimeout:  *sessionTimeout,
 		CleanupInterval: *cleanupInterval,
-		DefaultShell:    shellCmd,
+		DefaultCommand:  cmdPath,
+		DefaultArgs:     cmdArgs,
+		DefaultWorkdir:  *workdir,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,7 +101,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("Starting terminus-pty", "addr", addr, "shell", shellCmd, "version", version)
+		slog.Info("Starting terminus-pty", "addr", addr, "command", cmdPath, "args", cmdArgs, "workdir", *workdir, "version", version)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("Server error", "error", err)
 			os.Exit(1)

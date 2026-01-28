@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 type PoolConfig struct {
 	SessionTimeout  time.Duration
 	CleanupInterval time.Duration
-	DefaultShell    string
+	DefaultCommand  string
+	DefaultArgs     []string
+	DefaultWorkdir  string
 }
 
 type Pool struct {
@@ -29,13 +32,27 @@ func NewPool(config PoolConfig) *Pool {
 	}
 }
 
-func (p *Pool) Create(cols, rows uint16, command string) (*Session, error) {
-	shell := command
-	if shell == "" {
-		shell = p.config.DefaultShell
+func (p *Pool) Create(cols, rows uint16, command string, args []string, workdir string) (*Session, error) {
+	cmd := command
+	if cmd == "" {
+		cmd = p.config.DefaultCommand
 	}
 
-	ptty, err := pty.Spawn(shell, cols, rows, "")
+	cmdArgs := args
+	if len(cmdArgs) == 0 {
+		cmdArgs = p.config.DefaultArgs
+	}
+	// If still no args and command looks like a shell, use shell defaults
+	if len(cmdArgs) == 0 && (strings.HasSuffix(cmd, "sh") || strings.Contains(cmd, "/sh")) {
+		cmdArgs = []string{"-l", "-i"}
+	}
+
+	wd := workdir
+	if wd == "" {
+		wd = p.config.DefaultWorkdir
+	}
+
+	ptty, err := pty.Spawn(cmd, cmdArgs, cols, rows, wd)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +64,7 @@ func (p *Pool) Create(cols, rows uint16, command string) (*Session, error) {
 	p.sessions[id] = session
 	p.mu.Unlock()
 
-	slog.Info("Session created", "id", id, "shell", shell, "cols", cols, "rows", rows)
+	slog.Info("Session created", "id", id, "command", cmd, "args", cmdArgs, "workdir", wd, "cols", cols, "rows", rows)
 	return session, nil
 }
 

@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 
@@ -17,8 +18,13 @@ type Size struct {
 	Rows uint16 `json:"rows"`
 }
 
-func Spawn(shell string, cols, rows uint16, workdir string) (*PTY, error) {
-	cmd := exec.Command(shell, "-l", "-i")
+func Spawn(command string, args []string, cols, rows uint16, workdir string) (*PTY, error) {
+	// Validate command exists
+	if _, err := exec.LookPath(command); err != nil {
+		return nil, fmt.Errorf("command not found: %s", command)
+	}
+
+	cmd := exec.Command(command, args...)
 
 	if workdir != "" {
 		cmd.Dir = workdir

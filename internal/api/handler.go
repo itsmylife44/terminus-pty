@@ -50,9 +50,11 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateRequest struct {
-	Cols    uint16 `json:"cols"`
-	Rows    uint16 `json:"rows"`
-	Command string `json:"command,omitempty"`
+	Cols    uint16   `json:"cols"`
+	Rows    uint16   `json:"rows"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Workdir string   `json:"workdir,omitempty"`
 }
 
 type CreateResponse struct {
@@ -73,7 +75,7 @@ func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 		req.Rows = 24
 	}
 
-	sess, err := h.pool.Create(req.Cols, req.Rows, req.Command)
+	sess, err := h.pool.Create(req.Cols, req.Rows, req.Command, req.Args, req.Workdir)
 	if err != nil {
 		slog.Error("Failed to create session", "error", err)
 		http.Error(w, "Failed to create session: "+err.Error(), http.StatusInternalServerError)
