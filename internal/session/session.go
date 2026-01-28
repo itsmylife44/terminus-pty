@@ -88,7 +88,7 @@ func (s *Session) broadcastToClients(data []byte) {
 
 	var failed []*websocket.Conn
 	for _, client := range clients {
-		if err := client.WriteMessage(websocket.TextMessage, data); err != nil {
+		if err := client.WriteMessage(websocket.BinaryMessage, data); err != nil {
 			failed = append(failed, client)
 		}
 	}
